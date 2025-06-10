@@ -1,0 +1,17 @@
+body {
+  font-family: Arial, sans-serif;
+  text-align: center;
+  background: #f4f4f4;
+  padding: 20px;
+}
+video {
+  border: 2px solid #000;
+  width: 640px;
+  height: 480px;
+}
+#output {
+  margin-top: 20px;
+}
+span {
+  font-weight: bold;
+}

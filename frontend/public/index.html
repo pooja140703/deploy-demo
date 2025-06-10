@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>MoveNet Pose Detection with Drawing</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin: 0;
+      padding: 0;
+      background: #222;
+      color: #eee;
+    }
+    #video, #canvas {
+      position: absolute;
+      top: 50px;
+      left: 50%;
+      transform: translateX(-50%);
+      border-radius: 10px;
+    }
+    #video { z-index: 0; }
+    #canvas { z-index: 1; pointer-events: none; }
+    #count-box {
+      position: absolute;
+      top: 540px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 32px;
+      font-weight: bold;
+      color: #fff;
+      background: rgba(0,0,0,0.7);
+      padding: 10px 20px;
+      border-radius: 10px;
+      z-index: 2;
+      width: auto;
+    }
+    #output {
+      position: absolute;
+      top: 600px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 640px;
+      max-height: 150px;
+      overflow-y: auto;
+      background: #eee;
+      padding: 10px;
+      font-family: monospace;
+      border-radius: 5px;
+      color: #000;
+    }
+    #loading {
+      margin-top: 10px;
+      font-size: 18px;
+      color: #bbb;
+    }
+  </style>
+</head>
+<body>
+  <h2>Pose Detection with MoveNet</h2>
+  <video id="video" width="640" height="480" autoplay muted></video>
+  <canvas id="canvas" width="640" height="480"></canvas>
+  <div id="count-box">No Pose</div>
+  <pre id="output">Loading model...</pre>
+  <div id="loading"></div>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const output = document.getElementById('output');
+    const countBox = document.getElementById('count-box');
+    const loading = document.getElementById('loading');
+
+    let detector, lastSent = 0;
+    const sendInterval = 150;
+    const skeletonConnections = [
+      [0, 1], [1, 3], [0, 2], [2, 4], [5, 7], [7, 9],
+      [6, 8], [8, 10], [5, 6], [11, 13], [13, 15],
+      [12, 14], [14, 16], [11, 12], [5, 11], [6, 12]
+    ];
+
+    async function initCamera() {
+      loading.innerText = 'Accessing camera...';
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+      return new Promise(resolve => {
+        video.onloadedmetadata = () => resolve(video);
+      });
+    }
+
+    async function loadModel() {
+      loading.innerText = 'Loading MoveNet...';
+      await tf.setBackend('webgl');
+      detector = await poseDetection.createDetector(
+        poseDetection.SupportedModels.MoveNet,
+        { modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING }
+      );
+      loading.innerText = '';
+    }
+
+    function drawKeypoints(keypoints) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = 'lime';
+      ctx.lineWidth = 2;
+
+      skeletonConnections.forEach(([i, j]) => {
+        const kp1 = keypoints[i], kp2 = keypoints[j];
+        if (kp1.score > 0.4 && kp2.score > 0.4) {
+          ctx.beginPath();
+          ctx.moveTo(kp1.x, kp1.y);
+          ctx.lineTo(kp2.x, kp2.y);
+          ctx.stroke();
+        }
+      });
+
+      keypoints.forEach(kp => {
+        if (kp.score > 0.4) {
+          ctx.beginPath();
+          ctx.arc(kp.x, kp.y, 6, 0, 2 * Math.PI);
+          ctx.fillStyle = 'red';
+          ctx.fill();
+          ctx.strokeStyle = 'white';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      });
+    }
+
+    async function detectPose() {
+      const poses = await detector.estimatePoses(video);
+      if (poses.length > 0) {
+        const keypoints = poses[0].keypoints;
+        drawKeypoints(keypoints);
+
+        const now = Date.now();
+        if (now - lastSent > sendInterval) {
+          lastSent = now;
+          const rawKeypoints = keypoints.map(kp => [kp.x, kp.y, kp.score]);
+          // const rawKeypoints = keypoints.map(kp => [
+          //   kp.x / video.videoWidth,
+          //   kp.y / video.videoHeight,
+          //   kp.score
+          // ]);
+
+          fetch('http://127.0.0.1:8080/predict_pose', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                        keypoints: rawKeypoints,
+                        frameWidth: video.videoWidth,
+                        frameHeight: video.videoHeight
+                    })
+          })
+          .then(res => {
+            if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+            return res.json();
+          })
+          .then(data => {
+            const { pose, warning, confidence, keypoints: serverKeypoints } = data;
+
+            // Update pose label box
+            countBox.innerText = pose || 'No Pose';
+            countBox.style.backgroundColor = confidence >= 0.85 ? '#2ecc71' : '#e74c3c';
+
+            // Show detailed output
+            output.innerText = JSON.stringify({
+              pose,
+              confidence: confidence?.toFixed(3),
+              warning,
+              keypoints: serverKeypoints
+            }, null, 2);
+          })
+          .catch(err => {
+            console.error('Backend error:', err);
+            output.innerText = 'Backend error: ' + err.message;
+          });
+        }
+      } else {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        countBox.innerText = 'No Pose';
+        countBox.style.backgroundColor = '#999';
+      }
+      requestAnimationFrame(detectPose);
+    }
+
+    async function main() {
+      await initCamera();
+      await loadModel();
+      detectPose();
+    }
+
+    main();
+  </script>
+</body>
+</html>
